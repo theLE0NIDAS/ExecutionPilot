@@ -8,3 +8,4 @@ docs/
 scripts/
 share-manifest.txt
 .java-version
+*.env

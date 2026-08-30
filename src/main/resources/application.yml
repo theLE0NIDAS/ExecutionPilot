@@ -3,7 +3,8 @@ spring:
     name: executionpilot
   data:
     mongodb:
-      uri: mongodb://localhost:27017/executionpilot
+      uri: ${MONGODB_EXECPILOT_URI}
+      auto-index-creation: true
 
 server:
   port: 8080
