@@ -1,5 +1,6 @@
 package com.executionpilot.action.executor.decorator;
 
+import com.executionpilot.action.executor.ActionExecutionException;
 import com.executionpilot.action.executor.ActionContext;
 import com.executionpilot.action.executor.ActionExecutor;
 import com.executionpilot.action.executor.ActionResult;
@@ -39,6 +40,12 @@ public class TimeoutActionExecutorDecorator extends ActionExecutorDecorator {
             }
         }
 
+        if (timeoutMs < 1) {
+            log.warn("Non-positive timeoutMs config for action '{}'; using default {}ms",
+                    context.getActionDefinition().getActionId(), DEFAULT_TIMEOUT_MS);
+            timeoutMs = DEFAULT_TIMEOUT_MS;
+        }
+
         final long finalTimeoutMs = timeoutMs;
         final ActionContext finalContext = context;
 
@@ -53,14 +60,19 @@ public class TimeoutActionExecutorDecorator extends ActionExecutorDecorator {
             String msg = "Action '%s' timed out after %dms".formatted(
                     context.getActionDefinition().getActionId(), finalTimeoutMs);
             log.error(msg);
-            return ActionResult.failure(msg);
+            return ActionResult.retryableFailure(msg);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            return ActionResult.failure("Action execution was interrupted.");
+            return ActionResult.nonRetriableFailure("Action execution was interrupted.");
         } catch (ExecutionException e) {
             Throwable cause = e.getCause() != null ? e.getCause() : e;
             log.error("Action '{}' threw exception: {}", context.getActionDefinition().getActionId(), cause.getMessage());
-            return ActionResult.failure("Action threw exception: " + cause.getMessage());
+            if (cause instanceof ActionExecutionException actionExecutionException) {
+                return actionExecutionException.isRetriable()
+                        ? ActionResult.retryableFailure("Action threw exception: " + cause.getMessage())
+                        : ActionResult.nonRetriableFailure("Action threw exception: " + cause.getMessage());
+            }
+            return ActionResult.nonRetriableFailure("Action threw exception: " + cause.getMessage());
         }
     }
 }

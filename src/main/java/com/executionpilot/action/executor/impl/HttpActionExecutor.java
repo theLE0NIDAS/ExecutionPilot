@@ -35,16 +35,25 @@ public class HttpActionExecutor implements ActionExecutor {
         String url = (String) config.get("url");
 
         if (url == null || url.isBlank()) {
-            return ActionResult.failure("HTTP action config is missing required 'url'.");
+            return ActionResult.nonRetriableFailure("HTTP action config is missing required 'url'.");
         }
 
         String method = config.getOrDefault("method", "GET").toString().toUpperCase();
         String body = config.containsKey("body") ? config.get("body").toString() : null;
-        int timeoutSeconds = config.containsKey("timeoutSeconds")
-                ? Integer.parseInt(config.get("timeoutSeconds").toString())
-                : 10;
+        int timeoutSeconds;
+        try {
+            timeoutSeconds = config.containsKey("timeoutSeconds")
+                    ? Integer.parseInt(config.get("timeoutSeconds").toString())
+                    : 10;
+        } catch (NumberFormatException exception) {
+            return ActionResult.nonRetriableFailure("HTTP action 'timeoutSeconds' is not a valid number.");
+        }
 
         try {
+            if (timeoutSeconds < 1) {
+                return ActionResult.nonRetriableFailure("HTTP action 'timeoutSeconds' must be at least 1.");
+            }
+
             HttpRequest.Builder requestBuilder = HttpRequest.newBuilder()
                     .uri(URI.create(url))
                     .timeout(Duration.ofSeconds(timeoutSeconds));
@@ -66,12 +75,18 @@ public class HttpActionExecutor implements ActionExecutor {
             if (response.statusCode() >= 200 && response.statusCode() < 300) {
                 return ActionResult.success(output);
             } else {
-                return ActionResult.failure("HTTP call returned non-2xx status: " + response.statusCode(), output);
+                return response.statusCode() >= 500
+                        ? ActionResult.retryableFailure("HTTP call returned retryable status: " + response.statusCode(), output)
+                        : ActionResult.nonRetriableFailure("HTTP call returned non-retryable status: " + response.statusCode(), output);
             }
 
-        } catch (IOException | InterruptedException e) {
+        } catch (IllegalArgumentException e) {
+            return ActionResult.nonRetriableFailure("HTTP action configuration is invalid: " + e.getMessage());
+        } catch (IOException e) {
+            return ActionResult.retryableFailure("HTTP call failed: " + e.getMessage());
+        } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            return ActionResult.failure("HTTP call failed: " + e.getMessage());
+            return ActionResult.nonRetriableFailure("HTTP call was interrupted.");
         }
     }
 

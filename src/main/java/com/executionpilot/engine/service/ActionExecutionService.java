@@ -6,9 +6,10 @@ import com.executionpilot.action.executor.ActionExecutor;
 import com.executionpilot.action.executor.ActionResult;
 import com.executionpilot.action.executor.command.ActionCommand;
 import com.executionpilot.action.executor.decorator.LoggingActionExecutorDecorator;
-import com.executionpilot.action.executor.decorator.RetryActionExecutorDecorator;
 import com.executionpilot.action.executor.decorator.TimeoutActionExecutorDecorator;
 import com.executionpilot.action.factory.ActionExecutorFactory;
+import com.executionpilot.action.retry.RetryStrategy;
+import com.executionpilot.action.retry.RetryStrategyFactory;
 import com.executionpilot.engine.execution.ActionExecutionRecord;
 import com.executionpilot.engine.execution.ActionExecutionStatus;
 import com.executionpilot.engine.execution.WorkflowContext;
@@ -33,13 +34,16 @@ public class ActionExecutionService {
     private static final Logger log = LoggerFactory.getLogger(ActionExecutionService.class);
 
     private final ActionExecutorFactory executorFactory;
+    private final RetryStrategyFactory retryStrategyFactory;
     private final ActionExecutionRepository actionExecutionRepository;
 
     public ActionExecutionService(
             ActionExecutorFactory executorFactory,
+            RetryStrategyFactory retryStrategyFactory,
             ActionExecutionRepository actionExecutionRepository
     ) {
         this.executorFactory = executorFactory;
+        this.retryStrategyFactory = retryStrategyFactory;
         this.actionExecutionRepository = actionExecutionRepository;
     }
 
@@ -60,30 +64,132 @@ public class ActionExecutionService {
             String stateId,
             ActionDefinition actionDef,
             WorkflowContext workflowContext,
-            int attemptNo
+            int startingAttemptNo
     ) {
         ActionExecutor rawExecutor = executorFactory.getExecutor(actionDef.getType());
-
-        // Decorator chain: Logging wraps Retry wraps Timeout wraps raw executor
-        ActionExecutor decorated = new LoggingActionExecutorDecorator(
-                new RetryActionExecutorDecorator(
-                        new TimeoutActionExecutorDecorator(rawExecutor)
-                )
-        );
+        ActionExecutor decorated = new LoggingActionExecutorDecorator(new TimeoutActionExecutorDecorator(rawExecutor));
+        RetryStrategy retryStrategy = retryStrategyFactory.getStrategy(actionDef.getRetryPolicy().getBackoffType());
 
         ActionContext context = new ActionContext(executionId, workflowId, stateId, actionDef, workflowContext);
         ActionCommand command = new ActionCommand(context, decorated);
+        int maxAttempts = actionDef.getRetryPolicy().getMaxAttempts();
 
-        Instant start = Instant.now();
-        ActionResult result = command.execute();
-        Instant end = Instant.now();
+        for (int offset = 0; offset < maxAttempts; offset++) {
+            int attemptNo = startingAttemptNo + offset;
+            Instant start = Instant.now();
+            ActionResult result = command.execute();
+            Instant end = Instant.now();
 
-        ActionExecutionStatus status = result.isSuccess()
-                ? ActionExecutionStatus.SUCCESS
-                : ActionExecutionStatus.FAILED;
+            if (result.isSuccess()) {
+                return persistAttempt(
+                        UUID.randomUUID().toString(),
+                        executionId,
+                        workflowId,
+                        stateId,
+                        actionDef,
+                        workflowContext,
+                        attemptNo,
+                        ActionExecutionStatus.SUCCESS,
+                        result,
+                        start,
+                        end
+                );
+            }
 
+            if (!result.isRetriable()) {
+                log.warn("Stopping retries for action '{}' after non-retriable failure on attempt {}: {}",
+                        actionDef.getActionId(), attemptNo, result.getErrorMessage());
+                return persistAttempt(
+                        UUID.randomUUID().toString(),
+                        executionId,
+                        workflowId,
+                        stateId,
+                        actionDef,
+                        workflowContext,
+                        attemptNo,
+                        ActionExecutionStatus.FAILED,
+                        result,
+                        start,
+                        end
+                );
+            }
+
+            if (offset == maxAttempts - 1) {
+                log.error("Action '{}' exhausted {} attempts. Last error: {}",
+                        actionDef.getActionId(), maxAttempts, result.getErrorMessage());
+                return persistAttempt(
+                        UUID.randomUUID().toString(),
+                        executionId,
+                        workflowId,
+                        stateId,
+                        actionDef,
+                        workflowContext,
+                        attemptNo,
+                        ActionExecutionStatus.FAILED,
+                        result,
+                        start,
+                        end
+                );
+            }
+
+            String retryRecordId = UUID.randomUUID().toString();
+            persistAttempt(
+                    retryRecordId,
+                    executionId,
+                    workflowId,
+                    stateId,
+                    actionDef,
+                    workflowContext,
+                    attemptNo,
+                    ActionExecutionStatus.RETRYING,
+                    result,
+                    start,
+                    end
+            );
+
+            long delayMillis = retryStrategy.computeDelayMillis(actionDef.getRetryPolicy(), offset + 1);
+            try {
+                Thread.sleep(delayMillis);
+            } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+                ActionResult interruptedResult = ActionResult.nonRetriableFailure(
+                        "Retry backoff interrupted after attempt " + attemptNo + ": " + exception.getMessage(),
+                        result.getOutput()
+                );
+                return persistAttempt(
+                        retryRecordId,
+                        executionId,
+                        workflowId,
+                        stateId,
+                        actionDef,
+                        workflowContext,
+                        attemptNo,
+                        ActionExecutionStatus.FAILED,
+                        interruptedResult,
+                        start,
+                        Instant.now()
+                );
+            }
+        }
+
+        throw new IllegalStateException("Action execution loop ended unexpectedly for action: " + actionDef.getActionId());
+    }
+
+    private ActionExecutionRecord persistAttempt(
+            String actionExecutionId,
+            String executionId,
+            String workflowId,
+            String stateId,
+            ActionDefinition actionDef,
+            WorkflowContext workflowContext,
+            int attemptNo,
+            ActionExecutionStatus status,
+            ActionResult result,
+            Instant startedAt,
+            Instant finishedAt
+    ) {
         ActionExecutionRecord record = new ActionExecutionRecord(
-                UUID.randomUUID().toString(),
+                actionExecutionId,
                 executionId,
                 workflowId,
                 stateId,
@@ -93,10 +199,9 @@ public class ActionExecutionService {
                 workflowContext,
                 result.getOutput(),
                 result.getErrorMessage(),
-                start,
-                end
+                startedAt,
+                finishedAt
         );
-
         return actionExecutionRepository.save(record);
     }
 }

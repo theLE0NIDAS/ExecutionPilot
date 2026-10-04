@@ -23,18 +23,18 @@ public class DelayActionExecutor implements ActionExecutor {
         Object rawMs = config.get("durationMs");
 
         if (rawMs == null) {
-            return ActionResult.failure("WAIT action config is missing required 'durationMs'.");
+            return ActionResult.nonRetriableFailure("WAIT action config is missing required 'durationMs'.");
         }
 
         long durationMs;
         try {
             durationMs = Long.parseLong(rawMs.toString());
         } catch (NumberFormatException e) {
-            return ActionResult.failure("WAIT action 'durationMs' is not a valid number: " + rawMs);
+            return ActionResult.nonRetriableFailure("WAIT action 'durationMs' is not a valid number: " + rawMs);
         }
 
         if (durationMs < 0) {
-            return ActionResult.failure("WAIT action 'durationMs' must be non-negative.");
+            return ActionResult.nonRetriableFailure("WAIT action 'durationMs' must be non-negative.");
         }
 
         log.info("Delaying execution for {}ms (executionId={})", durationMs, context.getExecutionId());
@@ -43,7 +43,7 @@ public class DelayActionExecutor implements ActionExecutor {
             Thread.sleep(durationMs);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            return ActionResult.failure("Delay was interrupted.");
+            return ActionResult.nonRetriableFailure("Delay was interrupted.");
         }
 
         return ActionResult.success("Waited " + durationMs + "ms");

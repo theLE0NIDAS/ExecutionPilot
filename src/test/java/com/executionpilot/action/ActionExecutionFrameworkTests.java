@@ -6,6 +6,7 @@ import com.executionpilot.action.definition.RetryBackoffType;
 import com.executionpilot.action.definition.RetryPolicy;
 import com.executionpilot.action.executor.ActionContext;
 import com.executionpilot.action.executor.ActionExecutor;
+import com.executionpilot.action.executor.ActionExecutionException;
 import com.executionpilot.action.executor.ActionResult;
 import com.executionpilot.action.executor.command.ActionCommand;
 import com.executionpilot.action.executor.decorator.LoggingActionExecutorDecorator;
@@ -15,6 +16,7 @@ import com.executionpilot.action.executor.impl.CustomActionExecutor;
 import com.executionpilot.action.executor.impl.DelayActionExecutor;
 import com.executionpilot.action.executor.impl.LogActionExecutor;
 import com.executionpilot.action.factory.ActionExecutorFactory;
+import com.executionpilot.action.retry.RetryStrategyFactory;
 import com.executionpilot.engine.execution.WorkflowContext;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -173,7 +175,7 @@ class ActionExecutionFrameworkTests {
     @Test
     void retryDecorator_succeedsOnFirstAttempt() {
         LogActionExecutor core = new LogActionExecutor();
-        RetryActionExecutorDecorator decorated = new RetryActionExecutorDecorator(core);
+        RetryActionExecutorDecorator decorated = new RetryActionExecutorDecorator(core, RetryStrategyFactory.defaultFactory());
         ActionDefinition def = new ActionDefinition("a1", "Log", ActionType.LOG,
                 Map.of("message", "retry test"), retryThrice());
         ActionContext ctx = new ActionContext("e1", "w1", "s1", def, workflowContext);
@@ -188,7 +190,7 @@ class ActionExecutionFrameworkTests {
             @Override
             public ActionResult execute(ActionContext ctx) {
                 callCount.incrementAndGet();
-                return ActionResult.failure("simulated failure");
+                return ActionResult.retryableFailure("simulated failure");
             }
 
             @Override
@@ -201,7 +203,7 @@ class ActionExecutionFrameworkTests {
                 Map.of("message", "fail"), retryThrice());
         ActionContext ctx = new ActionContext("e1", "w1", "s1", def, workflowContext);
 
-        RetryActionExecutorDecorator decorated = new RetryActionExecutorDecorator(alwaysFails);
+        RetryActionExecutorDecorator decorated = new RetryActionExecutorDecorator(alwaysFails, RetryStrategyFactory.defaultFactory());
         ActionResult result = decorated.execute(ctx);
 
         assertThat(result.isSuccess()).isFalse();
@@ -215,7 +217,7 @@ class ActionExecutionFrameworkTests {
             @Override
             public ActionResult execute(ActionContext ctx) {
                 int count = callCount.incrementAndGet();
-                return count == 1 ? ActionResult.failure("first fail") : ActionResult.success("ok");
+                return count == 1 ? ActionResult.retryableFailure("first fail") : ActionResult.success("ok");
             }
 
             @Override
@@ -228,7 +230,7 @@ class ActionExecutionFrameworkTests {
                 Map.of("message", "retry"), retryThrice());
         ActionContext ctx = new ActionContext("e1", "w1", "s1", def, workflowContext);
 
-        RetryActionExecutorDecorator decorated = new RetryActionExecutorDecorator(failOnceThenSucceed);
+        RetryActionExecutorDecorator decorated = new RetryActionExecutorDecorator(failOnceThenSucceed, RetryStrategyFactory.defaultFactory());
         ActionResult result = decorated.execute(ctx);
 
         assertThat(result.isSuccess()).isTrue();
@@ -258,6 +260,32 @@ class ActionExecutionFrameworkTests {
         ActionContext ctx = new ActionContext("e1", "w1", "s1", def, workflowContext);
         ActionResult result = decorated.execute(ctx);
         assertThat(result.isSuccess()).isFalse();
+        assertThat(result.isRetriable()).isTrue();
         assertThat(result.getErrorMessage()).contains("timed out");
+    }
+
+    @Test
+    void timeoutDecorator_stopsOnNonRetriableException() {
+        ActionExecutor core = new ActionExecutor() {
+            @Override
+            public ActionResult execute(ActionContext ctx) {
+                throw ActionExecutionException.nonRetriable("bad config");
+            }
+
+            @Override
+            public boolean supports(ActionType type) {
+                return true;
+            }
+        };
+
+        TimeoutActionExecutorDecorator decorated = new TimeoutActionExecutorDecorator(core);
+        ActionDefinition def = new ActionDefinition("a6", "Broken", ActionType.LOG,
+                Map.of("timeoutMs", "1000"), noRetry());
+        ActionContext ctx = new ActionContext("e1", "w1", "s1", def, workflowContext);
+        ActionResult result = decorated.execute(ctx);
+
+        assertThat(result.isSuccess()).isFalse();
+        assertThat(result.isRetriable()).isFalse();
+        assertThat(result.getErrorMessage()).contains("bad config");
     }
 }
