@@ -14,6 +14,7 @@ import com.executionpilot.action.executor.decorator.RetryActionExecutorDecorator
 import com.executionpilot.action.executor.decorator.TimeoutActionExecutorDecorator;
 import com.executionpilot.action.executor.impl.CustomActionExecutor;
 import com.executionpilot.action.executor.impl.DelayActionExecutor;
+import com.executionpilot.action.executor.impl.HttpActionExecutor;
 import com.executionpilot.action.executor.impl.LogActionExecutor;
 import com.executionpilot.action.factory.ActionExecutorFactory;
 import com.executionpilot.action.retry.RetryStrategyFactory;
@@ -49,6 +50,10 @@ class ActionExecutionFrameworkTests {
 
     private ActionDefinition customAction() {
         return new ActionDefinition("action-custom", "Custom", ActionType.CUSTOM, Map.of(), noRetry());
+    }
+
+    private ActionDefinition httpAction(Map<String, Object> config) {
+        return new ActionDefinition("action-http", "Http", ActionType.HTTP_CALL, config, noRetry());
     }
 
     private RetryPolicy noRetry() {
@@ -126,6 +131,57 @@ class ActionExecutionFrameworkTests {
         CustomActionExecutor executor = new CustomActionExecutor();
         assertThat(executor.supports(ActionType.CUSTOM)).isTrue();
         assertThat(executor.supports(ActionType.SCRIPT)).isTrue();
+    }
+
+    // ---- HttpActionExecutor ----
+
+    @Test
+    void httpActionExecutor_failsWhenUrlIsMissing() {
+        HttpActionExecutor executor = new HttpActionExecutor();
+        ActionResult result = executor.execute(contextFor(httpAction(Map.of())));
+
+        assertThat(result.isSuccess()).isFalse();
+        assertThat(result.isRetriable()).isFalse();
+        assertThat(result.getErrorMessage()).contains("missing required 'url'");
+    }
+
+    @Test
+    void httpActionExecutor_failsWhenTimeoutIsInvalid() {
+        HttpActionExecutor executor = new HttpActionExecutor();
+        ActionResult result = executor.execute(contextFor(httpAction(Map.of(
+                "url", "http://localhost",
+                "timeoutSeconds", "abc"
+        ))));
+
+        assertThat(result.isSuccess()).isFalse();
+        assertThat(result.isRetriable()).isFalse();
+        assertThat(result.getErrorMessage()).contains("timeoutSeconds");
+    }
+
+    @Test
+    void httpActionExecutor_failsWhenTimeoutIsNonPositive() {
+        HttpActionExecutor executor = new HttpActionExecutor();
+        ActionResult result = executor.execute(contextFor(httpAction(Map.of(
+                "url", "http://localhost",
+                "timeoutSeconds", "0"
+        ))));
+
+        assertThat(result.isSuccess()).isFalse();
+        assertThat(result.isRetriable()).isFalse();
+        assertThat(result.getErrorMessage()).contains("at least 1");
+    }
+
+    @Test
+    void httpActionExecutor_failsWhenUrlIsInvalid() {
+        HttpActionExecutor executor = new HttpActionExecutor();
+        ActionResult result = executor.execute(contextFor(httpAction(Map.of(
+                "url", "not-a-valid-uri",
+                "timeoutSeconds", "1"
+        ))));
+
+        assertThat(result.isSuccess()).isFalse();
+        assertThat(result.isRetriable()).isFalse();
+        assertThat(result.getErrorMessage()).contains("configuration is invalid");
     }
 
     // ---- ActionExecutorFactory ----

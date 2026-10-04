@@ -19,6 +19,8 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
 
 /**
@@ -66,6 +68,24 @@ public class ActionExecutionService {
             WorkflowContext workflowContext,
             int startingAttemptNo
     ) {
+        return executeActionWithHistory(
+                executionId,
+                workflowId,
+                stateId,
+                actionDef,
+                workflowContext,
+                startingAttemptNo
+        ).getLast();
+    }
+
+    public List<ActionExecutionRecord> executeActionWithHistory(
+            String executionId,
+            String workflowId,
+            String stateId,
+            ActionDefinition actionDef,
+            WorkflowContext workflowContext,
+            int startingAttemptNo
+    ) {
         ActionExecutor rawExecutor = executorFactory.getExecutor(actionDef.getType());
         ActionExecutor decorated = new LoggingActionExecutorDecorator(new TimeoutActionExecutorDecorator(rawExecutor));
         RetryStrategy retryStrategy = retryStrategyFactory.getStrategy(actionDef.getRetryPolicy().getBackoffType());
@@ -73,6 +93,7 @@ public class ActionExecutionService {
         ActionContext context = new ActionContext(executionId, workflowId, stateId, actionDef, workflowContext);
         ActionCommand command = new ActionCommand(context, decorated);
         int maxAttempts = actionDef.getRetryPolicy().getMaxAttempts();
+        List<ActionExecutionRecord> records = new ArrayList<>();
 
         for (int offset = 0; offset < maxAttempts; offset++) {
             int attemptNo = startingAttemptNo + offset;
@@ -81,7 +102,7 @@ public class ActionExecutionService {
             Instant end = Instant.now();
 
             if (result.isSuccess()) {
-                return persistAttempt(
+                records.add(persistAttempt(
                         UUID.randomUUID().toString(),
                         executionId,
                         workflowId,
@@ -93,13 +114,14 @@ public class ActionExecutionService {
                         result,
                         start,
                         end
-                );
+                ));
+                return List.copyOf(records);
             }
 
             if (!result.isRetriable()) {
                 log.warn("Stopping retries for action '{}' after non-retriable failure on attempt {}: {}",
                         actionDef.getActionId(), attemptNo, result.getErrorMessage());
-                return persistAttempt(
+                records.add(persistAttempt(
                         UUID.randomUUID().toString(),
                         executionId,
                         workflowId,
@@ -111,13 +133,14 @@ public class ActionExecutionService {
                         result,
                         start,
                         end
-                );
+                ));
+                return List.copyOf(records);
             }
 
             if (offset == maxAttempts - 1) {
                 log.error("Action '{}' exhausted {} attempts. Last error: {}",
                         actionDef.getActionId(), maxAttempts, result.getErrorMessage());
-                return persistAttempt(
+                records.add(persistAttempt(
                         UUID.randomUUID().toString(),
                         executionId,
                         workflowId,
@@ -129,11 +152,12 @@ public class ActionExecutionService {
                         result,
                         start,
                         end
-                );
+                ));
+                return List.copyOf(records);
             }
 
             String retryRecordId = UUID.randomUUID().toString();
-            persistAttempt(
+            records.add(persistAttempt(
                     retryRecordId,
                     executionId,
                     workflowId,
@@ -145,7 +169,7 @@ public class ActionExecutionService {
                     result,
                     start,
                     end
-            );
+            ));
 
             long delayMillis = retryStrategy.computeDelayMillis(actionDef.getRetryPolicy(), offset + 1);
             try {
@@ -156,7 +180,7 @@ public class ActionExecutionService {
                         "Retry backoff interrupted after attempt " + attemptNo + ": " + exception.getMessage(),
                         result.getOutput()
                 );
-                return persistAttempt(
+                records.add(persistAttempt(
                         retryRecordId,
                         executionId,
                         workflowId,
@@ -168,7 +192,8 @@ public class ActionExecutionService {
                         interruptedResult,
                         start,
                         Instant.now()
-                );
+                ));
+                return List.copyOf(records);
             }
         }
 

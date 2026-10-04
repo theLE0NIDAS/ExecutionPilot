@@ -174,6 +174,83 @@ class ActionFaultHandlingTests {
                 .containsExactly(ActionExecutionStatus.RETRYING, ActionExecutionStatus.FAILED);
     }
 
+    @Test
+    void actionExecutionService_stopsOnNonRetriableFailureResult() {
+        AtomicInteger callCount = new AtomicInteger(0);
+        ActionExecutor invalidExecutor = new ActionExecutor() {
+            @Override
+            public ActionResult execute(ActionContext context) {
+                callCount.incrementAndGet();
+                return ActionResult.nonRetriableFailure("bad request");
+            }
+
+            @Override
+            public boolean supports(ActionType type) {
+                return type == ActionType.LOG;
+            }
+        };
+
+        InMemoryActionExecutionRepository repository = new InMemoryActionExecutionRepository();
+        ActionExecutionService service = new ActionExecutionService(
+                new ActionExecutorFactory(List.of(invalidExecutor)),
+                RetryStrategyFactory.defaultFactory(),
+                repository
+        );
+
+        ActionExecutionRecord finalRecord = service.executeAction(
+                "exec-5",
+                "wf-5",
+                "state-1",
+                actionDefinition(ActionType.LOG, retryPolicy(5), Map.of()),
+                new WorkflowContext("exec-5", Map.of()),
+                1
+        );
+
+        assertThat(callCount.get()).isEqualTo(1);
+        assertThat(finalRecord.getStatus()).isEqualTo(ActionExecutionStatus.FAILED);
+        assertThat(finalRecord.getAttemptNo()).isEqualTo(1);
+        assertThat(repository.records()).hasSize(1);
+    }
+
+    @Test
+    void executeActionWithHistory_returnsAllAttemptsAndHonorsStartingAttemptNumber() {
+        AtomicInteger callCount = new AtomicInteger(0);
+        ActionExecutor flakyExecutor = new ActionExecutor() {
+            @Override
+            public ActionResult execute(ActionContext context) {
+                return callCount.incrementAndGet() == 1
+                        ? ActionResult.retryableFailure("first temporary failure")
+                        : ActionResult.success(Map.of("ok", true));
+            }
+
+            @Override
+            public boolean supports(ActionType type) {
+                return type == ActionType.LOG;
+            }
+        };
+
+        InMemoryActionExecutionRepository repository = new InMemoryActionExecutionRepository();
+        ActionExecutionService service = new ActionExecutionService(
+                new ActionExecutorFactory(List.of(flakyExecutor)),
+                RetryStrategyFactory.defaultFactory(),
+                repository
+        );
+
+        List<ActionExecutionRecord> history = service.executeActionWithHistory(
+                "exec-6",
+                "wf-6",
+                "state-1",
+                actionDefinition(ActionType.LOG, retryPolicy(3), Map.of()),
+                new WorkflowContext("exec-6", Map.of()),
+                4
+        );
+
+        assertThat(history).hasSize(2);
+        assertThat(history).extracting(ActionExecutionRecord::getAttemptNo).containsExactly(4, 5);
+        assertThat(history).extracting(ActionExecutionRecord::getStatus)
+                .containsExactly(ActionExecutionStatus.RETRYING, ActionExecutionStatus.SUCCESS);
+    }
+
     private ActionDefinition actionDefinition(ActionType type, RetryPolicy retryPolicy, Map<String, Object> config) {
         return new ActionDefinition("action-1", "Action", type, config, retryPolicy);
     }
