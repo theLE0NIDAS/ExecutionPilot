@@ -12,7 +12,7 @@ public record StateDefinitionRequest(
         @NotBlank String stateId,
         @NotBlank String name,
         @NotNull StateType type,
-        @Valid @NotNull List<@Valid ActionDefinitionRequest> actions
+        @NotNull List<@Valid ActionDefinitionRequest> actions
 ) {
     public StateDefinitionRequest {
         actions = List.copyOf(new ArrayList<>(actions));
