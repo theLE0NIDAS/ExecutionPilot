@@ -1,17 +1,22 @@
 package com.executionpilot.api.service;
 
 import com.executionpilot.action.definition.ActionDefinition;
+import com.executionpilot.action.definition.ActionType;
+import com.executionpilot.action.definition.RetryBackoffType;
 import com.executionpilot.action.definition.RetryPolicy;
 import com.executionpilot.api.dto.ActionDefinitionRequest;
 import com.executionpilot.api.dto.ActionDefinitionResponse;
 import com.executionpilot.api.dto.ActionExecutionRecordResponse;
 import com.executionpilot.api.dto.CreateWorkflowRequest;
 import com.executionpilot.api.dto.ExecutionStatusResponse;
+import com.executionpilot.api.dto.GenerateWorkflowRequest;
 import com.executionpilot.api.dto.RetryPolicyRequest;
 import com.executionpilot.api.dto.RetryPolicyResponse;
 import com.executionpilot.api.dto.StateDefinitionRequest;
 import com.executionpilot.api.dto.StateDefinitionResponse;
+import com.executionpilot.api.dto.TransitionDefinitionRequest;
 import com.executionpilot.api.dto.TransitionDefinitionResponse;
+import com.executionpilot.api.dto.WorkflowPreviewResponse;
 import com.executionpilot.api.dto.WorkflowResponse;
 import com.executionpilot.api.dto.WorkflowVersionSummaryResponse;
 import com.executionpilot.api.dto.TriggerWorkflowExecutionRequest;
@@ -30,12 +35,19 @@ import com.executionpilot.workflow.builder.StateDefinitionBuilder;
 import com.executionpilot.workflow.builder.TransitionDefinitionBuilder;
 import com.executionpilot.workflow.builder.WorkflowBuilder;
 import com.executionpilot.workflow.domain.StateDefinition;
+import com.executionpilot.workflow.domain.StateType;
 import com.executionpilot.workflow.domain.TransitionDefinition;
 import com.executionpilot.workflow.domain.Workflow;
 import com.executionpilot.workflow.domain.WorkflowStatus;
+import com.executionpilot.workflow.generator.GeneratedWorkflowDraft;
+import com.executionpilot.workflow.generator.WorkflowGenerationMode;
+import com.executionpilot.workflow.generator.WorkflowGenerator;
+import com.executionpilot.workflow.generator.WorkflowGeneratorFactory;
+import com.executionpilot.workflow.validator.ValidationErrorCode;
 import com.executionpilot.workflow.validator.ValidationMessage;
 import com.executionpilot.workflow.validator.WorkflowValidationResult;
 import com.executionpilot.workflow.validator.WorkflowValidatorChain;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.stereotype.Service;
 
 import java.time.Duration;
@@ -51,6 +63,7 @@ public class WorkflowLifecycleService {
     private final ActionExecutionRepository actionExecutionRepository;
     private final AsyncWorkflowExecutionService asyncWorkflowExecutionService;
     private final WorkflowValidatorChain workflowValidatorChain = WorkflowValidatorChain.defaultChain();
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
     public WorkflowLifecycleService(
             WorkflowDefinitionRepository workflowDefinitionRepository,
@@ -74,6 +87,19 @@ public class WorkflowLifecycleService {
 
         Workflow saved = workflowDefinitionRepository.save(toWorkflow(request, WorkflowStatus.DRAFT));
         return toWorkflowResponse(saved);
+    }
+
+    public WorkflowResponse generateWorkflowDraft(GenerateWorkflowRequest request) {
+        WorkflowGenerationMode generationMode = WorkflowGenerationMode.from(request.generationStrategy());
+        WorkflowGenerator generator = WorkflowGeneratorFactory.get(generationMode);
+        GeneratedWorkflowDraft generated = generator.generate(request.prompt(), request.workflowName());
+
+        WorkflowValidationResult validationResult = workflowValidatorChain.validate(toWorkflow(generated.request(), WorkflowStatus.DRAFT));
+        if (!validationResult.isValid()) {
+            throw new InvalidWorkflowDefinitionException("Generated workflow failed validation.", validationResult);
+        }
+
+        return createWorkflowDraft(generated.request());
     }
 
     public WorkflowResponse updateWorkflowDraft(String workflowId, int version, CreateWorkflowRequest request) {
@@ -113,6 +139,50 @@ public class WorkflowLifecycleService {
         );
         Workflow saved = workflowDefinitionRepository.save(activatedWorkflow);
         return toWorkflowResponse(saved);
+    }
+
+    public WorkflowPreviewResponse previewWorkflow(CreateWorkflowRequest request) {
+        Workflow draft = toWorkflow(request, WorkflowStatus.DRAFT);
+        WorkflowValidationResult validationResult = workflowValidatorChain.validate(draft);
+
+        List<String> topologicalOrder = validationResult.getTopologicalOrder() == null
+                ? List.of()
+                : validationResult.getTopologicalOrder();
+
+        return new WorkflowPreviewResponse(
+                validationResult.isValid(),
+                validationResult.isValid() ? "Workflow is ready for activation." : "Workflow contains validation errors.",
+                validationResult.getMessages().stream().map(ValidationMessage::message).toList(),
+                topologicalOrder
+        );
+    }
+
+    public String exportWorkflow(String workflowId, int version) {
+        Workflow workflow = workflowDefinitionRepository.findByWorkflowIdAndVersion(workflowId, version)
+                .orElseThrow(() -> new ResourceNotFoundException(
+                        "Workflow not found for workflowId='" + workflowId + "' and version=" + version));
+        return toJson(toExportDocument(workflow));
+    }
+
+    public WorkflowResponse importWorkflow(String json) {
+        try {
+            WorkflowImportDocument imported = parseImportDocument(json);
+            return createWorkflowDraft(new CreateWorkflowRequest(
+                    imported.workflowId(),
+                    imported.name(),
+                    imported.version(),
+                    imported.startStateId(),
+                    imported.endStateId(),
+                    imported.states().stream().map(this::toStateRequest).toList(),
+                    imported.transitions().stream().map(this::toTransitionRequest).toList()
+            ));
+        } catch (RuntimeException ex) {
+            WorkflowValidationResult invalid = WorkflowValidationResult.builder()
+                    .addMessage(new ValidationMessage(ValidationErrorCode.TOPOLOGICAL_SORT_FAILED,
+                            "Imported workflow is invalid or not supported.", true))
+                    .build();
+            throw new InvalidWorkflowDefinitionException("Imported workflow is invalid or not supported.", invalid);
+        }
     }
 
     public WorkflowResponse getWorkflow(String workflowId, int version, WorkflowStatus status) {
@@ -180,6 +250,114 @@ public class WorkflowLifecycleService {
         return validationResult.getMessages().stream()
                 .map(this::toValidationDetail)
                 .toList();
+    }
+
+    private StateDefinitionRequest toStateRequest(StateImport state) {
+        return new StateDefinitionRequest(
+                state.stateId(),
+                state.name(),
+                state.type(),
+                state.actions().stream().map(this::toActionRequest).toList()
+        );
+    }
+
+    private ActionDefinitionRequest toActionRequest(ActionImport action) {
+        return new ActionDefinitionRequest(
+                action.actionId(),
+                action.name(),
+                action.type(),
+                action.config(),
+                toRetryPolicyRequest(action.retryPolicy())
+        );
+    }
+
+    private RetryPolicyRequest toRetryPolicyRequest(RetryPolicyImport retryPolicy) {
+        return new RetryPolicyRequest(
+                retryPolicy.maxAttempts(),
+                retryPolicy.initialDelayMillis(),
+                retryPolicy.maxDelayMillis(),
+                retryPolicy.backoffType()
+        );
+    }
+
+    private TransitionDefinitionRequest toTransitionRequest(TransitionImport transition) {
+        return new TransitionDefinitionRequest(
+                transition.transitionId(),
+                transition.fromStateId(),
+                transition.toStateId(),
+                transition.eventName(),
+                transition.guardExpression()
+        );
+    }
+
+    private String toJson(Object payload) {
+        try {
+            return objectMapper.writeValueAsString(payload);
+        } catch (Exception ex) {
+            throw new IllegalStateException("Failed to serialize workflow payload.", ex);
+        }
+    }
+
+    private WorkflowImportDocument parseImportDocument(String json) {
+        try {
+            return objectMapper.readValue(json, WorkflowImportDocument.class);
+        } catch (Exception ex) {
+            throw new IllegalArgumentException("Workflow import payload is malformed.", ex);
+        }
+    }
+
+    private WorkflowImportDocument toExportDocument(Workflow workflow) {
+        return new WorkflowImportDocument(
+                workflow.getWorkflowId(),
+                workflow.getName(),
+                workflow.getVersion(),
+                workflow.getStatus(),
+                workflow.getStartStateId(),
+                workflow.getEndStateId(),
+                workflow.getStates().values().stream()
+                        .sorted(Comparator.comparing(StateDefinition::getStateId))
+                        .map(this::toStateImport)
+                        .toList(),
+                workflow.getTransitions().stream().map(this::toTransitionImport).toList()
+        );
+    }
+
+    private StateImport toStateImport(StateDefinition state) {
+        return new StateImport(
+                state.getStateId(),
+                state.getName(),
+                state.getType(),
+                state.getActions().stream().map(this::toActionImport).toList()
+        );
+    }
+
+    private ActionImport toActionImport(ActionDefinition action) {
+        return new ActionImport(
+                action.getActionId(),
+                action.getName(),
+                action.getType(),
+                action.getConfig(),
+                toRetryPolicyImport(action.getRetryPolicy())
+        );
+    }
+
+    private RetryPolicyImport toRetryPolicyImport(RetryPolicy policy) {
+        return new RetryPolicyImport(
+                policy.getMaxAttempts(),
+                policy.getInitialDelay().toMillis(),
+                policy.getMaxDelay().toMillis(),
+                policy.getBackoffType()
+        );
+    }
+
+    private TransitionImport toTransitionImport(TransitionDefinition transition) {
+        return new TransitionImport(
+                transition.getTransitionId(),
+                transition.getFromStateId(),
+                transition.getToStateId(),
+                transition.getEventName(),
+                transition.getGuardExpression()
+        );
     }
 
     private String toValidationDetail(ValidationMessage message) {
@@ -333,5 +511,51 @@ public class WorkflowLifecycleService {
                 record.getStartedAt(),
                 record.getFinishedAt()
         );
+    }
+
+    private record WorkflowImportDocument(
+            String workflowId,
+            String name,
+            int version,
+            WorkflowStatus status,
+            String startStateId,
+            String endStateId,
+            List<StateImport> states,
+            List<TransitionImport> transitions
+    ) {
+    }
+
+    private record StateImport(
+            String stateId,
+            String name,
+            StateType type,
+            List<ActionImport> actions
+    ) {
+    }
+
+    private record ActionImport(
+            String actionId,
+            String name,
+            ActionType type,
+            java.util.Map<String, Object> config,
+            RetryPolicyImport retryPolicy
+    ) {
+    }
+
+    private record RetryPolicyImport(
+            int maxAttempts,
+            long initialDelayMillis,
+            long maxDelayMillis,
+            RetryBackoffType backoffType
+    ) {
+    }
+
+    private record TransitionImport(
+            String transitionId,
+            String fromStateId,
+            String toStateId,
+            String eventName,
+            String guardExpression
+    ) {
     }
 }

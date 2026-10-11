@@ -3,13 +3,17 @@ package com.executionpilot.api.controller;
 import com.executionpilot.api.dto.ActionExecutionRecordResponse;
 import com.executionpilot.api.dto.CreateWorkflowRequest;
 import com.executionpilot.api.dto.ExecutionStatusResponse;
+import com.executionpilot.api.dto.GenerateWorkflowRequest;
 import com.executionpilot.api.dto.TriggerWorkflowExecutionRequest;
+import com.executionpilot.api.dto.WorkflowPreviewResponse;
 import com.executionpilot.api.dto.WorkflowResponse;
 import com.executionpilot.api.dto.WorkflowVersionSummaryResponse;
 import com.executionpilot.api.service.WorkflowLifecycleService;
 import com.executionpilot.workflow.domain.WorkflowStatus;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -40,6 +44,17 @@ public class WorkflowController {
         return workflowLifecycleService.createWorkflowDraft(request);
     }
 
+    @PostMapping("/workflows/generate")
+    @ResponseStatus(HttpStatus.CREATED)
+    public WorkflowResponse generateWorkflow(@Valid @RequestBody GenerateWorkflowRequest request) {
+        return workflowLifecycleService.generateWorkflowDraft(request);
+    }
+
+    @PostMapping("/workflows/preview")
+    public WorkflowPreviewResponse previewWorkflow(@Valid @RequestBody CreateWorkflowRequest request) {
+        return workflowLifecycleService.previewWorkflow(request);
+    }
+
     @PutMapping("/workflows/{workflowId}/versions/{version}/draft")
     public WorkflowResponse updateWorkflowDraft(
             @PathVariable String workflowId,
@@ -52,6 +67,19 @@ public class WorkflowController {
     @PostMapping("/workflows/{workflowId}/versions/{version}/activate")
     public WorkflowResponse activateWorkflow(@PathVariable String workflowId, @PathVariable int version) {
         return workflowLifecycleService.activateWorkflow(workflowId, version);
+    }
+
+    @GetMapping("/workflows/{workflowId}/versions/{version}/export")
+    public ResponseEntity<String> exportWorkflow(@PathVariable String workflowId, @PathVariable int version) {
+        return ResponseEntity.ok()
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(workflowLifecycleService.exportWorkflow(workflowId, version));
+    }
+
+    @PostMapping(value = "/workflows/import", consumes = MediaType.APPLICATION_JSON_VALUE)
+    @ResponseStatus(HttpStatus.CREATED)
+    public WorkflowResponse importWorkflow(@RequestBody String json) {
+        return workflowLifecycleService.importWorkflow(json);
     }
 
     @GetMapping("/workflows/{workflowId}/versions/{version}")

@@ -3,6 +3,7 @@ package com.executionpilot.api.controller;
 import com.executionpilot.action.executor.impl.LogActionExecutor;
 import com.executionpilot.api.dto.ActionDefinitionRequest;
 import com.executionpilot.api.dto.CreateWorkflowRequest;
+import com.executionpilot.api.dto.GenerateWorkflowRequest;
 import com.executionpilot.api.dto.RetryPolicyRequest;
 import com.executionpilot.api.dto.StateDefinitionRequest;
 import com.executionpilot.api.dto.TransitionDefinitionRequest;
@@ -144,6 +145,65 @@ class WorkflowControllerApiTests {
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.code").value("INVALID_WORKFLOW"))
                 .andExpect(jsonPath("$.details[0]").exists());
+    }
+
+    @Test
+    void previewWorkflowReturnsValidationFeedback() throws Exception {
+        CreateWorkflowRequest invalid = invalidWorkflowRequestWithOrphanState("wf-preview", 1);
+
+        mockMvc.perform(post("/api/workflows/preview")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsBytes(invalid)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.valid").value(false))
+                .andExpect(jsonPath("$.validationErrors[0]").exists());
+    }
+
+    @Test
+    void generateWorkflowDraftFromPromptCreatesDraftOnly() throws Exception {
+        GenerateWorkflowRequest request = new GenerateWorkflowRequest(
+                "Create a workflow for processing customer orders and shipping approval",
+                "Order Processing",
+                "LLM"
+        );
+
+        mockMvc.perform(post("/api/workflows/generate")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsBytes(request)))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.workflowId").value("order-processing"))
+                .andExpect(jsonPath("$.status").value("DRAFT"));
+    }
+
+    @Test
+    void exportAndImportWorkflowRoundTrip() throws Exception {
+        CreateWorkflowRequest request = validWorkflowRequest("wf-export", 1);
+
+        mockMvc.perform(post("/api/workflows")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsBytes(request)))
+                .andExpect(status().isCreated());
+
+        String exportBody = mockMvc.perform(get("/api/workflows/wf-export/versions/1/export"))
+                .andExpect(status().isOk())
+                .andReturn()
+                .getResponse()
+                .getContentAsString();
+
+        JsonNode exportNode = objectMapper.readTree(exportBody);
+        assertThat(exportNode.get("workflowId").asText()).isEqualTo("wf-export");
+
+        JsonNode imported = exportNode.deepCopy();
+        ((com.fasterxml.jackson.databind.node.ObjectNode) imported).put("workflowId", "wf-imported");
+        ((com.fasterxml.jackson.databind.node.ObjectNode) imported).put("name", "Imported Workflow");
+        ((com.fasterxml.jackson.databind.node.ObjectNode) imported).put("version", 1);
+
+        mockMvc.perform(post("/api/workflows/import")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(imported)))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.workflowId").value("wf-imported"))
+                .andExpect(jsonPath("$.status").value("DRAFT"));
     }
 
     @Test
